@@ -15,18 +15,19 @@ proc, elf, libc = (None, None, None)
 
 
 def get_server():
+    global proc, elf, libc
     if args.noaslr:
         proc = p.process(sys.argv[1], setuid=False, aslr=False)
     else:
         proc = p.process(sys.argv[1:])
     elf  = proc.elf
-    return (proc, elf, elf.libc)
+    libc = elf.libc
+    assert libc is not None
 
 
 def restart_server():
-    global proc, elf, libc 
     proc.kill()
-    proc, elf, libc = get_server()
+    get_server()
 
 
 def attach_gdb(gdbscript=""):
@@ -35,13 +36,14 @@ def attach_gdb(gdbscript=""):
 
     gdbscript = ("gef-init\n" if args.gef else "pwndbg-init\n") + gdbscript
     p.gdb.attach(proc, gdbscript=gdbscript)
+    time.sleep(1)
 
 
-class thd_comm:
+class thread_comm(p.remote):
     def __init__(self, host="localhost", port=1337):
         if proc is None:
             print("!WARNING! Proc isn't started.")
-        self.thd = p.remote(host, port)
+        super().__init__(host, port)
 
 
     def prompt_cmd(self, cmd):
@@ -51,19 +53,19 @@ class thd_comm:
         if isinstance(cmd, str):
             cmd = cmd.encode()
 
-        self.thd.clean()
-        self.thd.sendline(cmd)
+        self.clean()
+        self.sendline(cmd)
 
 
     def send_idx(self, idx):
-        self.thd.sendline(str(idx).encode())
+        self.sendline(str(idx).encode())
 
 
     def printf(self, idx: int):
         self.prompt_cmd("printf")
         self.send_idx(idx)
-        self.thd.recvuntil(b"MESSAGE: ")
-        return self.thd.recvline(drop=True)
+        self.recvuntil(b"MESSAGE: ")
+        return self.recvline(drop=True)
 
 
     def malloc(self, idx: int):
@@ -84,41 +86,39 @@ class thd_comm:
 
     def send_flag(self):
         self.prompt_cmd(b"send_flag")
-        if self.thd.recvuntil(b"pwn.", timeout=2) != b"":
-            return self.thd.recv(55)
+        if self.recvuntil(b"pwn.", timeout=2) != b"":
+            return self.recv(55)
         return b""
 
 
-parser = argparse.ArgumentParser(usage="Usage: ./script.py [binary]")
-parser.add_argument('binary')
-parser.add_argument('-g', "--gef",   action='store_true')
-parser.add_argument('-p', "--pwndbg",   action='store_true')
-parser.add_argument('-n', "--noaslr", action='store_true')
-parser.add_argument('-l', "--log-level", default='info', type=str)
-args = parser.parse_args()
+# We malloc, scanf 16 random bytes to buffer and then race:
+# thd1: strlen(buf) => returns 8 bytes
+# thd2: free(buf)   => get metadata into buf
+# thd1: write(1, buf, stlren) => syscall writing out the metadata
+def tcache_leak(th1: thread_comm, thd2: thread_comm):
+    pass
 
-p.log_level = args.log_level
 
-proc, elf, libc = get_server()
-assert libc is not None
+def exploit():
+    pass
 
-thd = thd_comm()
-attach_gdb('''
-    thread 2
-    b malloc
-    commands
-        finish
-        set $maddr=$rax
-    end
-    b free
-    commands
-        finish
-    end
-    c
-''')
-thd.malloc(0)
-thd.scanf(0, b"test")
-print(thd.printf(0))
-thd.free(0)
 
-thd.thd.interactive()
+def main():
+    parser = argparse.ArgumentParser(usage="Usage: ./script.py [binary]")
+    parser.add_argument('binary')
+    parser.add_argument('-g', "--gef",   action='store_true')
+    parser.add_argument('-p', "--pwndbg",   action='store_true')
+    parser.add_argument('-n', "--noaslr", action='store_true')
+    parser.add_argument('-l', "--log-level", default='info', type=str)
+    args = parser.parse_args()
+
+    p.context.log_level = args.log_level
+
+    get_server()
+
+    exploit()
+    proc.interactive()
+
+
+if __name__ == '__main__':
+    main()
